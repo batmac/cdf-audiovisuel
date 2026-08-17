@@ -34,6 +34,21 @@ MOIS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet',
         'août', 'septembre', 'octobre', 'novembre', 'décembre']
 
 AUTRES = 'Autres enseignements'
+GENERALE = 'Collège de France'
+
+# Les 8 chaînes YouTube du Collège (une par domaine + la chaîne générale),
+# listées sur /fr/le-college/diffusion-numerique-des-savoirs
+YT_CHANNELS = [
+    'UCzZiy3EANVAx7h2XYqXsVbw',  # Collège de France (générale)
+    'UCQHCy-zCD-luzeNQiSc_4Mg',  # Histoire et archéologie
+    'UCyZnBE2D98VgMqTgIFksX9g',  # Sciences sociales
+    'UCedamoEQgcR4kF_l_Zgipqg',  # Lettres, langage, philosophie
+    'UCENYlRe2MNqSsK38QYG4W4Q',  # Physique et chimie
+    'UCdhpyHOyliFNArgEaO6dAqw',  # Sciences de la vie
+    'UCk58LsWC9j892FUMBwN5AsQ',  # Mathématiques et informatique
+    'UCZzYTanB9FqpERKdmG3ja8A',  # Sciences de l'Univers
+]
+YT_PER_CHANNEL = 6
 
 
 def get(url, timeout=25):
@@ -90,6 +105,48 @@ def fetch_thumbs(items):
                 print(f'vignette KO ({e}): {u}', file=sys.stderr)
                 cache[u] = None
         o['thumb_b64'] = cache.get(u)
+
+
+def parse_channel(cid):
+    """Chaîne YouTube : nom, domaine (= nom sans le suffixe) et dernières vidéos."""
+    ns = {'a': 'http://www.w3.org/2005/Atom', 'media': 'http://search.yahoo.com/mrss/'}
+    root = ET.fromstring(get(f'https://www.youtube.com/feeds/videos.xml?channel_id={cid}'))
+    name = root.findtext('a:title', default='', namespaces=ns).strip()
+    area = re.sub(r'\s*-\s*Collège de France\s*$', '', name).strip() or GENERALE
+    videos = []
+    for e in root.findall('a:entry', ns)[:YT_PER_CHANNEL]:
+        m = e.find('media:group', ns)
+        thumb = m.find('media:thumbnail', ns) if m is not None else None
+        stats = m.find('media:community/media:statistics', ns) if m is not None else None
+        link = e.find("a:link[@rel='alternate']", ns)
+        videos.append(dict(
+            title=(e.findtext('a:title', default='', namespaces=ns)).strip(),
+            link=link.get('href') if link is not None else '',
+            published=e.findtext('a:published', default='', namespaces=ns),
+            thumb=thumb.get('url') if thumb is not None else None,
+            views=int(stats.get('views')) if stats is not None and stats.get('views') else None,
+        ))
+    return dict(name=name, area=area,
+                url=f'https://www.youtube.com/channel/{cid}', videos=videos)
+
+
+def yt_date(iso):
+    m = re.match(r'(\d{4})-(\d{2})-(\d{2})', iso or '')
+    if not m:
+        return ''
+    d = int(m.group(3))
+    return f"{'1er' if d == 1 else d} {MOIS[int(m.group(2)) - 1]} {m.group(1)}"
+
+
+def yt_views(n):
+    if n is None:
+        return ''
+    if n >= 1_000_000:
+        s = f'{n / 1_000_000:.1f}'.rstrip('0').rstrip('.')
+        return s.replace('.', ',') + ' M de vues'
+    if n >= 1000:
+        return f'{n:,}'.replace(',', ' ') + ' vues'
+    return f'{n} vues'
 
 
 _chaire_cache = {}
@@ -174,6 +231,34 @@ def card(o):
 </a>'''
 
 
+def yt_card(v):
+    img = (f'<img src="{v["thumb_b64"]}" alt="" loading="lazy" width="480" height="270">'
+           if v.get('thumb_b64') else '<div class="noimg">Docet omnia</div>')
+    views = yt_views(v['views'])
+    return f'''<a class="card" href="{html.escape(v['link'])}" target="_blank" rel="noopener">
+  <div class="thumb">{img}</div>
+  <div class="card-body">
+    <p class="meta"><span class="ktag">Vidéo</span>{yt_date(v['published'])}{('<span class="dot">·</span>' + views) if views else ''}</p>
+    <h3>{html.escape(v['title'])}</h3>
+    <p class="foot"><span class="go">Regarder sur YouTube<span class="arr">&nbsp;→</span></span></p>
+  </div>
+</a>'''
+
+
+def yt_block(ch):
+    n = len(ch['videos'])
+    cards = '\n'.join(yt_card(v) for v in ch['videos'])
+    return f'''<article class="series">
+  <header>
+    <p class="eyebrow">Chaîne YouTube<span class="count">{n} dernières vidéos</span></p>
+    <h3><a class="yt-link" href="{html.escape(ch['url'])}" target="_blank" rel="noopener">{html.escape(ch['name'])}</a></h3>
+  </header>
+  <div class="grid">
+{cards}
+  </div>
+</article>'''
+
+
 def series_block(g, meta):
     kinds = []
     for o in g:
@@ -197,6 +282,16 @@ def build():
     items = parse_feed(get(FEED))
     fetch_thumbs(items)
 
+    channels = []
+    for cid in YT_CHANNELS:
+        try:
+            ch = parse_channel(cid)
+            fetch_thumbs(ch['videos'])
+            channels.append(ch)
+        except Exception as e:
+            print(f'chaîne YouTube KO ({e}): {cid}', file=sys.stderr)
+    nvid = sum(len(c['videos']) for c in channels)
+
     order, groups = [], {}
     for o in items:
         if o['series'] not in groups:
@@ -205,19 +300,27 @@ def build():
         groups[o['series']].append(o)
     metas = {s: series_meta(groups[s]) for s in order}
 
-    # regroupe les séries par domaine ; domaines triés par volume, « Autres » en dernier
+    # regroupe séries RSS et chaînes YouTube par domaine ;
+    # domaines triés par volume, « Autres » puis la chaîne générale en dernier
     areas = {}
+
+    def area_info(a):
+        return areas.setdefault(a, dict(series=[], channels=[], color=None, n=0))
+
     for s in order:
-        a = metas[s]['area']
-        areas.setdefault(a, dict(series=[], color=None, n=0))
-        areas[a]['series'].append(s)
-        areas[a]['n'] += len(groups[s])
-        areas[a]['color'] = areas[a]['color'] or metas[s]['color']
-    area_order = sorted(areas, key=lambda a: (a == AUTRES, -areas[a]['n']))
+        info = area_info(metas[s]['area'])
+        info['series'].append(s)
+        info['n'] += len(groups[s])
+        info['color'] = info['color'] or metas[s]['color']
+    for ch in channels:
+        info = area_info(ch['area'])
+        info['channels'].append(ch)
+        info['n'] += len(ch['videos'])
+    area_order = sorted(areas, key=lambda a: (a == GENERALE, a == AUTRES, -areas[a]['n']))
 
     chips, sections = [], []
     chips.append(f'<button class="chip is-active" data-area="*" aria-pressed="true">'
-                 f'Tout<span class="n">{len(items)}</span></button>')
+                 f'Tout<span class="n">{len(items) + nvid}</span></button>')
     for a in area_order:
         info = areas[a]
         slug = slugify(a)
@@ -225,10 +328,16 @@ def build():
                if info['color'] else '<span class="adot"></span>')
         chips.append(f'<button class="chip" data-area="{slug}" aria-pressed="false">'
                      f'{dot}{html.escape(a)}<span class="n">{info["n"]}</span></button>')
-        blocks = '\n'.join(series_block(groups[s], metas[s]) for s in info['series'])
+        blocks = ([series_block(groups[s], metas[s]) for s in info['series']]
+                  + [yt_block(ch) for ch in info['channels']])
+        nb_s = sum(len(groups[s]) for s in info['series'])
+        counts = [f'{nb_s} séance{"s" if nb_s > 1 else ""}'] if nb_s else []
+        nb_v = info['n'] - nb_s
+        if nb_v:
+            counts.append(f'{nb_v} vidéo{"s" if nb_v > 1 else ""}')
         sections.append(f'''<section class="theme-group" id="theme-{slug}" data-area="{slug}">
-  <h2 class="theme-head">{dot}{html.escape(a)}<span class="count">{info['n']} séance{'s' if info['n'] > 1 else ''}</span></h2>
-{blocks}
+  <h2 class="theme-head">{dot}{html.escape(a)}<span class="count">{' · '.join(counts)}</span></h2>
+{chr(10).join(blocks)}
 </section>''')
 
     faces = []
@@ -376,6 +485,9 @@ body {{
   font-size: clamp(1.15rem, 2.4vw, 1.45rem); margin: 0;
   text-wrap: balance;
 }}
+.yt-link {{ color: inherit; text-decoration: none; }}
+.yt-link:hover {{ color: var(--garnet-ink); text-decoration: underline;
+  text-decoration-thickness: 1px; text-underline-offset: 4px; }}
 .grid {{
   display: grid; gap: 18px;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -434,9 +546,10 @@ footer.colophon a {{ color: var(--garnet-ink); }}
   <header class="masthead">
     <p class="motto">Docet omnia · depuis 1530</p>
     <h1>Audiovisuel du Collège de France</h1>
-    <p class="sub">Les {len(items)} dernières parutions audio et vidéo des cours, séminaires et colloques,
-    d'après le <a href="https://www.college-de-france.fr/fr/audio-video-rss.xml" target="_blank" rel="noopener">flux RSS officiel</a>.
-    Chaque séance est en accès libre sur college-de-france.fr.</p>
+    <p class="sub">Les {len(items)} dernières parutions audio et vidéo des cours, séminaires et colloques
+    (<a href="https://www.college-de-france.fr/fr/audio-video-rss.xml" target="_blank" rel="noopener">flux RSS officiel</a>),
+    et les dernières vidéos des <a href="https://www.college-de-france.fr/fr/le-college/diffusion-numerique-des-savoirs" target="_blank" rel="noopener">{len(channels)} chaînes YouTube</a> du Collège.
+    Tout est en accès libre.</p>
   </header>
   <nav class="themes" aria-label="Filtrer par thème">
 {chr(10).join(chips)}
@@ -474,7 +587,8 @@ footer.colophon a {{ color: var(--garnet-ink); }}
     open(standalone, 'w').write(
         f'<!doctype html>\n<html lang="fr">\n<head>\n{head}\n</head>\n<body>\n{body}</body>\n</html>\n')
     themes = ', '.join(f'{a} ({areas[a]["n"]})' for a in area_order)
-    print(f'{frag} — {os.path.getsize(frag)} octets, {len(items)} séances, {len(order)} séries')
+    print(f'{frag} — {os.path.getsize(frag)} octets, {len(items)} séances, {len(order)} séries, '
+          f'{nvid} vidéos YouTube ({len(channels)} chaînes)')
     print(f'thèmes : {themes}')
 
 
