@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Génère la page « Audiovisuel du Collège de France ».
 
-Autonome : relit le flux RSS officiel, télécharge les vignettes (embarquées en
-data URI car le CSP des artifacts bloque les images externes), résout pour
-chaque série son titre, sa chaire et son domaine thématique depuis les pages du
-site (taxonomie « area » du Collège), et écrit à côté de ce script :
+Autonome : relit le flux RSS officiel des séances et les flux des 8 chaînes
+YouTube du Collège, classe chaque parution dans son domaine thématique
+(taxonomie « area » des chaires du site), télécharge les vignettes (embarquées
+en data URI car le CSP des artifacts bloque les images externes), et écrit à
+côté de ce script :
   - index.html : page complète autonome, déployée sur GitHub Pages ;
   - cdf.html   : le même contenu en fragment, pour l'artifact claude.ai
                  https://claude.ai/code/artifact/7b06793a-187a-4932-8037-f5837c9788f7
+
+La page est un fil unique de cartes par thème : séances du site et vidéos
+YouTube mélangées, triées par date décroissante, badge de provenance sur
+chaque carte.
 """
 import xml.etree.ElementTree as ET
 import re, html, base64, os, sys, datetime
@@ -69,24 +74,19 @@ def parse_feed(xml_bytes):
         desc = it.findtext('description') or ''
         paras = [re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', p)).strip()
                  for p in re.findall(r'<p>(.*?)</p>', desc, re.S)]
-        when, speaker, fmts = '', '', []
+        when, speaker = '', ''
         if paras:
             m = re.search(r'du\s+(.+)$', paras[0])
             when = m.group(1) if m else paras[0]
         for p in paras[1:]:
             if p.startswith('Par '):
                 speaker = p[4:].strip()
-            elif p.startswith('Disponible au format'):
-                if 'Audio' in p:
-                    fmts.append('Audio')
-                if 'Vidéo' in p:
-                    fmts.append('Vidéo')
         thumbs = re.findall(
             r'https://www\.college-de-france\.fr/sites/default/files/styles/'
             r'16_9_audiovisual_s/[^\s"&]+\?h=[0-9a-f]+&amp;itok=[\w-]+', desc)
         parts = link.split('/')
         items.append(dict(
-            title=title, link=link, when=when, speaker=speaker, fmts=fmts,
+            title=title, link=link, when=when, speaker=speaker,
             thumb=thumbs[0].replace('&amp;', '&') if thumbs else None,
             kind=parts[5] if len(parts) > 6 else '',
             series=parts[6] if len(parts) > 7 else link,
@@ -114,28 +114,50 @@ def parse_channel(cid):
     name = root.findtext('a:title', default='', namespaces=ns).strip()
     area = re.sub(r'\s*-\s*Collège de France\s*$', '', name).strip() or GENERALE
     videos = []
-    for e in root.findall('a:entry', ns)[:YT_PER_CHANNEL]:
+    for e in root.findall('a:entry', ns):
         m = e.find('media:group', ns)
         thumb = m.find('media:thumbnail', ns) if m is not None else None
         stats = m.find('media:community/media:statistics', ns) if m is not None else None
         link = e.find("a:link[@rel='alternate']", ns)
+        views = stats.get('views') if stats is not None else None
         videos.append(dict(
             title=(e.findtext('a:title', default='', namespaces=ns)).strip(),
             link=link.get('href') if link is not None else '',
             published=e.findtext('a:published', default='', namespaces=ns),
             thumb=thumb.get('url') if thumb is not None else None,
-            views=int(stats.get('views')) if stats is not None and stats.get('views') else None,
+            views=int(views) if views else None,
         ))
     return dict(name=name, area=area,
                 url=f'https://www.youtube.com/channel/{cid}', videos=videos)
 
 
-def yt_date(iso):
-    m = re.match(r'(\d{4})-(\d{2})-(\d{2})', iso or '')
-    if not m:
-        return ''
-    d = int(m.group(3))
-    return f"{'1er' if d == 1 else d} {MOIS[int(m.group(2)) - 1]} {m.group(1)}"
+def yt_split(title):
+    """« Titre (21) - Edouard Bard (2025-2026) » → (« Titre », « Edouard Bard », 21).
+
+    Gère aussi « Titre - Jean-Jacques Hublin » et « Titre (5) - 2026 ».
+    """
+    t, speaker = title.strip(), ''
+    m = re.match(r'(.+)\s-\s(.+?)\s*\(\d{4}(?:-\d{4})?\)$', t)
+    if m:
+        t, speaker = m.group(1).strip(), m.group(2).strip()
+    elif (m := re.match(r'(.+)\s-\s\d{4}$', t)):
+        t = m.group(1).strip()
+    elif (m := re.match(r'(.+)\s-\s([A-ZÀ-Ý][^,;:0-9]*)$', t)) and len(m.group(2).split()) <= 4:
+        t, speaker = m.group(1).strip(), m.group(2).strip()
+    num = None
+    if (m := re.search(r'\((\d{1,3})\)\s*$', t)):
+        num = int(m.group(1))
+        t = t[:m.start()].strip()
+    return re.sub(r'\.{3}\s*$', '…', t), speaker, num
+
+
+def norm_title(s):
+    s = s.lower().translate(str.maketrans('àâäéèêëîïôöùûüç', 'aaaeeeeiioouuuc'))
+    return re.sub(r'[^a-z0-9]+', ' ', s).strip()
+
+
+def fr_date(y, m, d):
+    return f"{'1er' if d == 1 else d} {MOIS[m - 1]} {y}"
 
 
 def yt_views(n):
@@ -143,9 +165,9 @@ def yt_views(n):
         return ''
     if n >= 1_000_000:
         s = f'{n / 1_000_000:.1f}'.rstrip('0').rstrip('.')
-        return s.replace('.', ',') + ' M de vues'
+        return s.replace('.', ',') + ' M de vues'
     if n >= 1000:
-        return f'{n:,}'.replace(',', ' ') + ' vues'
+        return f'{n:,}'.replace(',', ' ') + ' vues'
     return f'{n} vues'
 
 
@@ -190,21 +212,14 @@ def series_meta(g):
     return dict(title=title, area=area, color=color)
 
 
-def parse_when(w):
-    m = re.match(r'(?:(\w+)\s+)?(\d{1,2}(?:er)?\s+\S+\s+\d{4}),?\s*(\d{2}:\d{2})?', w)
+def site_date(when):
+    """« Vendredi 26 juin 2026, 06:15 - 06:30 » → (clé de tri, « 26 juin 2026 »)."""
+    m = re.search(r'(\d{1,2})(?:er)?\s+(\S+)\s+(\d{4})', when or '')
     if not m:
-        return w, ''
-    return m.group(2) or w, m.group(3) or ''
-
-
-def sort_key(o):
-    date, t = parse_when(o['when'])
-    m = re.match(r'(\d{1,2})(?:er)?\s+(\S+)\s+(\d{4})', date or '')
-    if not m:
-        return (0, t)
-    mois = m.group(2).lower()
+        return 0, when
+    d, mois, y = int(m.group(1)), m.group(2).lower(), int(m.group(3))
     mnum = MOIS.index(mois) + 1 if mois in MOIS else 0
-    return (int(m.group(3)) * 10000 + mnum * 100 + int(m.group(1)), t)
+    return y * 10000 + mnum * 100 + d, fr_date(y, mnum, d) if mnum else when
 
 
 def font_b64(name):
@@ -214,68 +229,20 @@ def font_b64(name):
     return base64.b64encode(open(p, 'rb').read()).decode()
 
 
-def card(o):
-    date, t = parse_when(o['when'])
-    kind = KIND_LABELS.get(o['kind'], o['kind'].replace('-', ' ').capitalize())
-    img = (f'<img src="{o["thumb_b64"]}" alt="" loading="lazy" width="388" height="218">'
-           if o['thumb_b64'] else '<div class="noimg">Docet omnia</div>')
-    fmts = ''.join(f'<span class="fmt">{f}</span>' for f in o['fmts'])
-    return f'''<a class="card" href="{html.escape(o['link'])}" target="_blank" rel="noopener">
+def card(e):
+    img = (f'<img src="{e["thumb_b64"]}" alt="" loading="lazy" width="480" height="270">'
+           if e.get('thumb_b64') else '<div class="noimg">Docet omnia</div>')
+    extra = f'<span class="dot">·</span>{e["extra"]}' if e['extra'] else ''
+    who = html.escape(' · '.join(x for x in (e['who'], e['context']) if x))
+    return f'''<a class="card" href="{html.escape(e['link'])}" target="_blank" rel="noopener">
   <div class="thumb">{img}</div>
   <div class="card-body">
-    <p class="meta"><span class="ktag">{html.escape(kind)}</span>{html.escape(date)}{('<span class="dot">·</span>' + t) if t else ''}</p>
-    <h3>{html.escape(o['title'])}</h3>
-    <p class="speaker">{html.escape(o['speaker'])}</p>
-    <p class="foot">{fmts}<span class="go">Écouter / regarder<span class="arr">&nbsp;→</span></span></p>
+    <p class="meta"><span class="ktag{' is-yt' if e['yt'] else ''}">{html.escape(e['kind'])}</span>{e['date']}{extra}</p>
+    <h3>{html.escape(e['title'])}</h3>
+    <p class="who" title="{who}">{who}</p>
+    <p class="foot"><span class="go">{'Regarder sur YouTube' if e['yt'] else 'Écouter / regarder'}<span class="arr">&nbsp;→</span></span></p>
   </div>
 </a>'''
-
-
-def yt_card(v):
-    img = (f'<img src="{v["thumb_b64"]}" alt="" loading="lazy" width="480" height="270">'
-           if v.get('thumb_b64') else '<div class="noimg">Docet omnia</div>')
-    views = yt_views(v['views'])
-    return f'''<a class="card" href="{html.escape(v['link'])}" target="_blank" rel="noopener">
-  <div class="thumb">{img}</div>
-  <div class="card-body">
-    <p class="meta"><span class="ktag">Vidéo</span>{yt_date(v['published'])}{('<span class="dot">·</span>' + views) if views else ''}</p>
-    <h3>{html.escape(v['title'])}</h3>
-    <p class="foot"><span class="go">Regarder sur YouTube<span class="arr">&nbsp;→</span></span></p>
-  </div>
-</a>'''
-
-
-def yt_block(ch):
-    n = len(ch['videos'])
-    cards = '\n'.join(yt_card(v) for v in ch['videos'])
-    return f'''<article class="series">
-  <header>
-    <p class="eyebrow">Chaîne YouTube<span class="count">{n} dernières vidéos</span></p>
-    <h3><a class="yt-link" href="{html.escape(ch['url'])}" target="_blank" rel="noopener">{html.escape(ch['name'])}</a></h3>
-  </header>
-  <div class="grid">
-{cards}
-  </div>
-</article>'''
-
-
-def series_block(g, meta):
-    kinds = []
-    for o in g:
-        k = KIND_LABELS.get(o['kind'], o['kind'])
-        if k not in kinds:
-            kinds.append(k)
-    n = len(g)
-    cards = '\n'.join(card(o) for o in sorted(g, key=sort_key))
-    return f'''<article class="series">
-  <header>
-    <p class="eyebrow">{html.escape(' & '.join(kinds))}<span class="count">{n} séance{'s' if n > 1 else ''}</span></p>
-    <h3>{html.escape(meta['title'])}</h3>
-  </header>
-  <div class="grid">
-{cards}
-  </div>
-</article>'''
 
 
 def build():
@@ -285,12 +252,9 @@ def build():
     channels = []
     for cid in YT_CHANNELS:
         try:
-            ch = parse_channel(cid)
-            fetch_thumbs(ch['videos'])
-            channels.append(ch)
+            channels.append(parse_channel(cid))
         except Exception as e:
             print(f'chaîne YouTube KO ({e}): {cid}', file=sys.stderr)
-    nvid = sum(len(c['videos']) for c in channels)
 
     order, groups = [], {}
     for o in items:
@@ -300,44 +264,83 @@ def build():
         groups[o['series']].append(o)
     metas = {s: series_meta(groups[s]) for s in order}
 
-    # regroupe séries RSS et chaînes YouTube par domaine ;
-    # domaines triés par volume, « Autres » puis la chaîne générale en dernier
+    # un seul fil d'entrées par domaine : séances du site + vidéos YouTube
     areas = {}
 
     def area_info(a):
-        return areas.setdefault(a, dict(series=[], channels=[], color=None, n=0))
+        return areas.setdefault(a, dict(entries=[], color=None))
 
     for s in order:
-        info = area_info(metas[s]['area'])
-        info['series'].append(s)
-        info['n'] += len(groups[s])
-        info['color'] = info['color'] or metas[s]['color']
+        meta = metas[s]
+        info = area_info(meta['area'])
+        info['color'] = info['color'] or meta['color']
+        for o in groups[s]:
+            key, date = site_date(o['when'])
+            info['entries'].append(dict(
+                key=key, yt=False, date=date,
+                kind=KIND_LABELS.get(o['kind'], o['kind'].replace('-', ' ').capitalize()),
+                title=o['title'], who=o['speaker'], context=meta['title'],
+                extra='', link=o['link'], thumb_b64=o['thumb_b64'],
+            ))
+    # doublons : les chaînes thématiques republient les séances du site sous un
+    # titre générique « Série (N) - Titulaire (2025-2026) » ; si la série est
+    # déjà présente via le flux du site, sa vidéo YouTube n'apporte rien
+    site_titles = [norm_title(metas[s]['title']) for s in order]
+
+    def is_dup(yt_title):
+        n = norm_title(yt_title)
+        return len(n) >= 12 and any(st.startswith(n) or n.startswith(st)
+                                    for st in site_titles)
+
+    nvid = 0
     for ch in channels:
         info = area_info(ch['area'])
-        info['channels'].append(ch)
-        info['n'] += len(ch['videos'])
-    area_order = sorted(areas, key=lambda a: (a == GENERALE, a == AUTRES, -areas[a]['n']))
+        kept = 0
+        for v in ch['videos']:
+            if kept >= YT_PER_CHANNEL:
+                break
+            t, who, num = yt_split(v['title'])
+            if is_dup(t):
+                continue
+            kept += 1
+            m = re.match(r'(\d{4})-(\d{2})-(\d{2})', v['published'] or '')
+            key, date = 0, ''
+            if m:
+                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                key, date = y * 10000 + mo * 100 + d, fr_date(y, mo, d)
+            who_parts = [x for x in (who, f'séance {num}' if num else '') if x]
+            info['entries'].append(dict(
+                key=key, yt=True, date=date, kind='YouTube',
+                title=t, who=' · '.join(who_parts) or ch['name'], context='',
+                extra=yt_views(v['views']), link=v['link'], thumb=v['thumb'],
+            ))
+        nvid += kept
+    fetch_thumbs([e for e in
+                  (x for a in areas.values() for x in a['entries']) if 'thumb' in e])
+
+    # domaines triés par volume, « Autres » puis la chaîne générale en dernier
+    area_order = sorted(areas, key=lambda a: (a == GENERALE, a == AUTRES,
+                                              -len(areas[a]['entries'])))
+    total = len(items) + nvid
 
     chips, sections = [], []
     chips.append(f'<button class="chip is-active" data-area="*" aria-pressed="true">'
-                 f'Tout<span class="n">{len(items) + nvid}</span></button>')
+                 f'Tout<span class="n">{total}</span></button>')
     for a in area_order:
         info = areas[a]
+        n = len(info['entries'])
         slug = slugify(a)
         dot = (f'<span class="adot" style="--c:{info["color"]}"></span>'
                if info['color'] else '<span class="adot"></span>')
         chips.append(f'<button class="chip" data-area="{slug}" aria-pressed="false">'
-                     f'{dot}{html.escape(a)}<span class="n">{info["n"]}</span></button>')
-        blocks = ([series_block(groups[s], metas[s]) for s in info['series']]
-                  + [yt_block(ch) for ch in info['channels']])
-        nb_s = sum(len(groups[s]) for s in info['series'])
-        counts = [f'{nb_s} séance{"s" if nb_s > 1 else ""}'] if nb_s else []
-        nb_v = info['n'] - nb_s
-        if nb_v:
-            counts.append(f'{nb_v} vidéo{"s" if nb_v > 1 else ""}')
+                     f'{dot}{html.escape(a)}<span class="n">{n}</span></button>')
+        cards = '\n'.join(card(e) for e in
+                          sorted(info['entries'], key=lambda e: -e['key']))
         sections.append(f'''<section class="theme-group" id="theme-{slug}" data-area="{slug}">
-  <h2 class="theme-head">{dot}{html.escape(a)}<span class="count">{' · '.join(counts)}</span></h2>
-{chr(10).join(blocks)}
+  <h2 class="theme-head">{dot}{html.escape(a)}<span class="count">{n} parution{'s' if n > 1 else ''}</span></h2>
+  <div class="grid">
+{cards}
+  </div>
 </section>''')
 
     faces = []
@@ -357,7 +360,7 @@ def build():
 }}''')
 
     today = datetime.date.today()
-    jour = f"{'1er' if today.day == 1 else today.day} {MOIS[today.month - 1]} {today.year}"
+    jour = fr_date(today.year, today.month, today.day)
 
     head = f'''<meta charset="utf-8">
 <title>Audiovisuel du Collège de France</title>
@@ -461,33 +464,16 @@ body {{
 .theme-group {{ margin-top: 48px; }}
 .theme-head {{
   font-family: 'Marcellus', Georgia, serif; font-weight: 400;
-  font-size: clamp(1.4rem, 3vw, 1.9rem); margin: 0 0 8px;
+  font-size: clamp(1.4rem, 3vw, 1.9rem); margin: 0 0 20px;
   display: flex; align-items: center; gap: 12px;
   border-bottom: 1px solid var(--line); padding-bottom: 12px;
 }}
 .theme-head .adot {{ width: 12px; height: 12px; }}
 .theme-head .count {{
-  margin-left: auto; font-family: inherit; font-size: .78rem;
+  margin-left: auto; font-size: .78rem;
   letter-spacing: .1em; text-transform: uppercase; color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
 }}
-.series {{ margin-top: 30px; }}
-.series header {{ display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px; }}
-.eyebrow {{
-  margin: 0;
-  font-size: .72rem; letter-spacing: .22em; text-transform: uppercase;
-  color: var(--garnet-ink); font-weight: 600;
-  display: flex; align-items: baseline; gap: 12px;
-}}
-.count {{ color: var(--ink-soft); letter-spacing: .08em; font-weight: 400; font-variant-numeric: tabular-nums; }}
-.series h3 {{
-  font-family: 'Marcellus', Georgia, serif; font-weight: 400;
-  font-size: clamp(1.15rem, 2.4vw, 1.45rem); margin: 0;
-  text-wrap: balance;
-}}
-.yt-link {{ color: inherit; text-decoration: none; }}
-.yt-link:hover {{ color: var(--garnet-ink); text-decoration: underline;
-  text-decoration-thickness: 1px; text-underline-offset: 4px; }}
 .grid {{
   display: grid; gap: 18px;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -518,19 +504,19 @@ body {{
 }}
 .meta .dot {{ margin: 0 .45em; color: var(--line); }}
 .ktag {{ color: var(--garnet-ink); margin-right: .8em; font-weight: 600; }}
+.ktag.is-yt {{ color: var(--ink-soft); }}
 .card h3 {{
   font-family: 'Marcellus', Georgia, serif; font-weight: 400;
   font-size: 1.02rem; line-height: 1.35; margin: 0;
   text-wrap: balance;
 }}
-.speaker {{ margin: 0; color: var(--ink-soft); font-size: .88rem; }}
+.who {{
+  margin: 0; color: var(--ink-soft); font-size: .85rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}}
 .foot {{
   margin: auto 0 0; padding-top: 12px;
-  display: flex; align-items: center; gap: 6px; font-size: .75rem;
-}}
-.fmt {{
-  border: 1px solid var(--line); color: var(--ink-soft);
-  padding: 1px 8px; letter-spacing: .06em;
+  display: flex; align-items: center; font-size: .75rem;
 }}
 .go {{ margin-left: auto; color: var(--garnet-ink); font-weight: 600; letter-spacing: .04em; }}
 .arr {{ display: inline-block; transition: transform .15s ease; }}
@@ -546,9 +532,10 @@ footer.colophon a {{ color: var(--garnet-ink); }}
   <header class="masthead">
     <p class="motto">Docet omnia · depuis 1530</p>
     <h1>Audiovisuel du Collège de France</h1>
-    <p class="sub">Les {len(items)} dernières parutions audio et vidéo des cours, séminaires et colloques
-    (<a href="https://www.college-de-france.fr/fr/audio-video-rss.xml" target="_blank" rel="noopener">flux RSS officiel</a>),
-    et les dernières vidéos des <a href="https://www.college-de-france.fr/fr/le-college/diffusion-numerique-des-savoirs" target="_blank" rel="noopener">{len(channels)} chaînes YouTube</a> du Collège.
+    <p class="sub">Les {total} dernières parutions du Collège, par thème et par date :
+    séances des cours, séminaires et colloques
+    (<a href="https://www.college-de-france.fr/fr/audio-video-rss.xml" target="_blank" rel="noopener">flux officiel</a>)
+    et vidéos des <a href="https://www.college-de-france.fr/fr/le-college/diffusion-numerique-des-savoirs" target="_blank" rel="noopener">{len(channels)} chaînes YouTube</a>.
     Tout est en accès libre.</p>
   </header>
   <nav class="themes" aria-label="Filtrer par thème">
@@ -556,7 +543,7 @@ footer.colophon a {{ color: var(--garnet-ink); }}
   </nav>
 {chr(10).join(sections)}
   <footer class="colophon">
-    <p>Flux relevé le {jour}, mis à jour chaque matin ·
+    <p>Flux relevés le {jour}, mis à jour chaque matin ·
     <a href="https://www.college-de-france.fr/fr/audios-videos" target="_blank" rel="noopener">Toutes les ressources audiovisuelles</a></p>
   </footer>
 </div>
@@ -586,7 +573,7 @@ footer.colophon a {{ color: var(--garnet-ink); }}
     standalone = os.path.join(HERE, 'index.html')
     open(standalone, 'w').write(
         f'<!doctype html>\n<html lang="fr">\n<head>\n{head}\n</head>\n<body>\n{body}</body>\n</html>\n')
-    themes = ', '.join(f'{a} ({areas[a]["n"]})' for a in area_order)
+    themes = ', '.join(f'{a} ({len(areas[a]["entries"])})' for a in area_order)
     print(f'{frag} — {os.path.getsize(frag)} octets, {len(items)} séances, {len(order)} séries, '
           f'{nvid} vidéos YouTube ({len(channels)} chaînes)')
     print(f'thèmes : {themes}')
