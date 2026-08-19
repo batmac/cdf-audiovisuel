@@ -238,15 +238,16 @@ def font_b64(name):
     return base64.b64encode(open(p, 'rb').read()).decode()
 
 
-def card(e):
+def card(e, slug, color):
     img = (f'<img src="{e["thumb_b64"]}" alt="" loading="lazy" width="480" height="270">'
            if e.get('thumb_b64') else '<div class="noimg">Docet omnia</div>')
     extra = f'<span class="dot">·</span>{e["extra"]}' if e['extra'] else ''
     who = html.escape(' · '.join(x for x in (e['who'], e['context']) if x))
-    return f'''<a class="card" href="{html.escape(e['link'])}" target="_blank" rel="noopener">
+    dot = f'<span class="adot" style="--c:{color}"></span>' if color else '<span class="adot"></span>'
+    return f'''<a class="card" data-k="{e['key']}" data-a="{slug}" href="{html.escape(e['link'])}" target="_blank" rel="noopener">
   <div class="thumb">{img}</div>
   <div class="card-body">
-    <p class="meta"><span class="ktag{' is-yt' if e['yt'] else ''}">{html.escape(e['kind'])}</span>{e['date']}{extra}</p>
+    <p class="meta">{dot}<span class="ktag{' is-yt' if e['yt'] else ''}">{html.escape(e['kind'])}</span>{e['date']}{extra}</p>
     <h3>{html.escape(e['title'])}</h3>
     <p class="who" title="{who}">{who}</p>
     <p class="foot"><span class="go">{'Regarder sur YouTube' if e['yt'] else 'Écouter / regarder'}<span class="arr">&nbsp;→</span></span></p>
@@ -299,6 +300,11 @@ def build():
     # titre générique « Série (N) - Titulaire (2025-2026) » ; si la série est
     # déjà présente via le flux du site, sa vidéo YouTube n'apporte rien
     site_titles = [norm_title(metas[s]['title']) for s in order]
+    # les conférences d'invités sont titrées « Invité (N) - Titulaire (année) » :
+    # si le « titre » YouTube est en fait un intervenant connu du site, on lui
+    # rend le titre de sa série
+    site_speaker_titles = {norm_title(o['speaker']): metas[s]['title']
+                           for s in order for o in groups[s] if o['speaker']}
 
     def is_dup(yt_title):
         n = norm_title(yt_title)
@@ -315,6 +321,8 @@ def build():
             t, who, num = yt_split(v['title'])
             if is_dup(t):
                 continue
+            if norm_title(t) in site_speaker_titles:
+                t, who = site_speaker_titles[norm_title(t)], t
             kept += 1
             m = re.match(r'(\d{4})-(\d{2})-(\d{2})', v['published'] or '')
             key, date = 0, ''
@@ -347,7 +355,7 @@ def build():
                if info['color'] else '<span class="adot"></span>')
         chips.append(f'<button class="chip" data-area="{slug}" aria-pressed="false">'
                      f'{dot}{html.escape(a)}<span class="n">{n}</span></button>')
-        cards = '\n'.join(card(e) for e in
+        cards = '\n'.join(card(e, slug, info['color']) for e in
                           sorted(info['entries'], key=lambda e: -e['key']))
         sections.append(f'''<section class="theme-group" id="theme-{slug}" data-area="{slug}">
   <h2 class="theme-head">{dot}{html.escape(a)}<span class="count">{n} parution{'s' if n > 1 else ''}</span></h2>
@@ -416,6 +424,7 @@ def build():
   --thumb-bg: #26271f;
 }}
 * {{ box-sizing: border-box; }}
+[hidden] {{ display: none !important; }}
 body {{
   margin: 0;
   background: var(--paper);
@@ -474,6 +483,20 @@ body {{
   width: 9px; height: 9px; border-radius: 50%; flex: none;
   background: var(--c, var(--bronze));
 }}
+.views {{
+  display: inline-flex; border: 1px solid var(--line); border-radius: 999px;
+  overflow: hidden; background: var(--panel);
+}}
+.vbtn {{
+  font: inherit; font-size: .8rem; border: 0; background: none;
+  color: var(--ink); padding: 4px 14px; cursor: pointer;
+}}
+.vbtn:focus-visible {{ outline: 2px solid var(--garnet); outline-offset: -2px; }}
+.vbtn.is-active {{ background: var(--ink); color: var(--paper); }}
+.sep {{ width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }}
+#flat {{ margin-top: 48px; }}
+.card .adot {{ display: none; width: 8px; height: 8px; vertical-align: 1px; margin-right: 9px; }}
+.view-date .card .adot {{ display: inline-block; }}
 .theme-group {{ margin-top: 48px; }}
 .theme-head {{
   font-family: 'Marcellus', Georgia, serif; font-weight: 400;
@@ -551,10 +574,18 @@ footer.colophon a {{ color: var(--garnet-ink); }}
     et vidéos des <a href="https://www.college-de-france.fr/fr/le-college/diffusion-numerique-des-savoirs" target="_blank" rel="noopener">{len(channels)} chaînes YouTube</a>.
     Tout est en accès libre.</p>
   </header>
-  <nav class="themes" aria-label="Filtrer par thème">
+  <nav class="themes" aria-label="Filtrer et trier">
+    <span class="views" role="group" aria-label="Tri">
+      <button class="vbtn is-active" data-view="theme" aria-pressed="true">Par thème</button>
+      <button class="vbtn" data-view="date" aria-pressed="false">Par date</button>
+    </span>
+    <span class="sep" aria-hidden="true"></span>
 {chr(10).join(chips)}
   </nav>
 {chr(10).join(sections)}
+  <section id="flat" hidden>
+    <div class="grid"></div>
+  </section>
   <footer class="colophon">
     <p>Flux relevés le {jour}, mis à jour chaque matin ·
     <a href="https://www.college-de-france.fr/fr/audios-videos" target="_blank" rel="noopener">Toutes les ressources audiovisuelles</a></p>
@@ -563,17 +594,51 @@ footer.colophon a {{ color: var(--garnet-ink); }}
 <script>
 (function () {{
   var chips = Array.prototype.slice.call(document.querySelectorAll('.chip'));
+  var vbtns = Array.prototype.slice.call(document.querySelectorAll('.vbtn'));
   var groups = Array.prototype.slice.call(document.querySelectorAll('.theme-group'));
+  var cards = Array.prototype.slice.call(document.querySelectorAll('.grid .card'));
+  var flat = document.getElementById('flat');
+  var flatGrid = flat.querySelector('.grid');
+  var home = cards.map(function (c) {{ return {{ card: c, grid: c.parentNode }}; }});
+  var byDate = cards.slice().sort(function (a, b) {{ return (+b.dataset.k) - (+a.dataset.k); }});
   var calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var view = 'theme', area = '*';
+
+  function apply() {{
+    document.documentElement.classList.toggle('view-date', view === 'date');
+    if (view === 'date') {{
+      byDate.forEach(function (c) {{
+        flatGrid.appendChild(c);
+        c.hidden = (area !== '*' && c.dataset.a !== area);
+      }});
+      groups.forEach(function (g) {{ g.hidden = true; }});
+      flat.hidden = false;
+    }} else {{
+      flat.hidden = true;
+      home.forEach(function (h) {{ h.grid.appendChild(h.card); h.card.hidden = false; }});
+      groups.forEach(function (g) {{ g.hidden = (area !== '*' && g.dataset.area !== area); }});
+    }}
+    scrollTo({{ top: 0, behavior: calm ? 'auto' : 'smooth' }});
+  }}
+
   chips.forEach(function (c) {{
     c.addEventListener('click', function () {{
       chips.forEach(function (x) {{
         x.classList.toggle('is-active', x === c);
         x.setAttribute('aria-pressed', String(x === c));
       }});
-      var a = c.dataset.area;
-      groups.forEach(function (g) {{ g.hidden = (a !== '*' && g.dataset.area !== a); }});
-      scrollTo({{ top: 0, behavior: calm ? 'auto' : 'smooth' }});
+      area = c.dataset.area;
+      apply();
+    }});
+  }});
+  vbtns.forEach(function (b) {{
+    b.addEventListener('click', function () {{
+      vbtns.forEach(function (x) {{
+        x.classList.toggle('is-active', x === b);
+        x.setAttribute('aria-pressed', String(x === b));
+      }});
+      view = b.dataset.view;
+      apply();
     }});
   }});
 }})();
