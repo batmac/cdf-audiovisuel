@@ -199,24 +199,25 @@ def chaire_area(path):
 
 
 def series_meta(g):
-    """Titre, domaine et couleur d'une série, lus sur la page de l'événement."""
+    """Titre, domaine et couleur d'une série, lus sur la page de l'événement.
+
+    Une erreur réseau ici est fatale (sinon la série serait mal titrée et mal
+    classée) ; seule l'absence de chaire retombe légitimement sur « Autres ».
+    """
     url = g[0]['link'].rsplit('/', 1)[0]
     title = g[0]['series'].replace('-', ' ').capitalize()
     area, color = AUTRES, None
-    try:
-        page = get(url).decode('utf-8', 'replace')
-        m = (re.search(r'property="og:title"\s+content="([^"]+)"', page)
-             or re.search(r'<title>([^<]+)</title>', page))
-        if m:
-            title = re.sub(r'\s*[|–-]\s*Collège de France\s*$',
-                           '', html.unescape(m.group(1))).strip()
-        for path in dict.fromkeys(re.findall(r'/fr/chaire/[\w-]+', page)):
-            found = chaire_area(path)
-            if found:
-                area, color = found
-                break
-    except Exception as e:
-        print(f'série KO ({e}): {url}', file=sys.stderr)
+    page = get(url).decode('utf-8', 'replace')
+    m = (re.search(r'property="og:title"\s+content="([^"]+)"', page)
+         or re.search(r'<title>([^<]+)</title>', page))
+    if m:
+        title = re.sub(r'\s*[|–-]\s*Collège de France\s*$',
+                       '', html.unescape(m.group(1))).strip()
+    for path in dict.fromkeys(re.findall(r'/fr/chaire/[\w-]+', page)):
+        found = chaire_area(path)
+        if found:
+            area, color = found
+            break
     return dict(title=title, area=area, color=color)
 
 
@@ -259,17 +260,14 @@ def build():
         sys.exit('flux du site vide : on ne remplace pas la page existante')
     fetch_thumbs(items)
 
+    # YouTube répond parfois 404 depuis les IP de datacenter : plutôt que de
+    # produire une page dégradée, on abandonne (la version en ligne reste)
     channels = []
     for cid in YT_CHANNELS:
         try:
             channels.append(parse_channel(cid))
         except Exception as e:
-            print(f'chaîne YouTube KO ({e}): {cid}', file=sys.stderr)
-    # YouTube bloque les IP de datacenter (404 systématique depuis GitHub
-    # Actions) : un build sans aucune chaîne est dégradé, on abandonne plutôt
-    # que d'écraser une bonne version
-    if not channels:
-        sys.exit('aucune chaîne YouTube récupérée : build abandonné')
+            sys.exit(f'chaîne YouTube irrécupérable ({e}): {cid} — build abandonné')
 
     order, groups = [], {}
     for o in items:

@@ -19,7 +19,10 @@ la taxonomie des chaires du site et écrit :
 - `cdf.html` — le même contenu en fragment, pour l'artifact claude.ai.
 
 Le workflow [`deploy.yml`](.github/workflows/deploy.yml) reconstruit et déploie
-le site chaque matin (cron 06:30 UTC), à chaque push, ou à la demande.
+le site chaque matin (cron 06:30 UTC, seconde chance à 12:30), à chaque push, ou
+à la demande. YouTube répondant parfois 404 depuis les runners, `build.py`
+échoue volontairement dès qu'une source manque : on ne déploie jamais une page
+dégradée, la version précédente reste en ligne.
 
 ```bash
 python3 build.py

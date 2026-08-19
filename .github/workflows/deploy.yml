@@ -1,9 +1,13 @@
-name: deploy
+name: build-and-deploy
 
-# La page est construite localement (build.py) puis commitée : YouTube renvoie
-# des 404 aux IP des runners GitHub, impossible de construire ici. Ce workflow
-# ne fait que déployer l'index.html commité sur GitHub Pages.
+# YouTube répond parfois 404 depuis certains runners (blocage intermittent des
+# IP de datacenter). build.py échoue alors volontairement : on ne déploie
+# jamais une page dégradée, la version précédente reste en ligne, et le cron
+# de midi offre une seconde chance.
 on:
+  schedule:
+    - cron: '30 6 * * *'  # ~08h30 Paris l'été, 07h30 l'hiver
+    - cron: '30 12 * * *' # seconde chance si le build du matin a échoué
   workflow_dispatch:
   push:
     branches: [main]
@@ -18,17 +22,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - name: Générer la page depuis les flux
+        run: python3 build.py
       - name: Préparer le site
         run: mkdir -p _site && cp index.html _site/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v4
