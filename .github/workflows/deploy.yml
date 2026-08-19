@@ -1,8 +1,9 @@
-name: build-and-deploy
+name: deploy
 
+# La page est construite localement (build.py) puis commitée : YouTube renvoie
+# des 404 aux IP des runners GitHub, impossible de construire ici. Ce workflow
+# ne fait que déployer l'index.html commité sur GitHub Pages.
 on:
-  schedule:
-    - cron: '30 6 * * *' # ~08h30 Paris l'été, 07h30 l'hiver
   workflow_dispatch:
   push:
     branches: [main]
@@ -17,24 +18,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Générer la page depuis le flux RSS
-        run: python3 build.py
-      - name: Préparer le site
-        run: mkdir -p _site && cp index.html _site/
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-
   deploy:
-    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+      - name: Préparer le site
+        run: mkdir -p _site && cp index.html _site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
       - id: deployment
         uses: actions/deploy-pages@v4

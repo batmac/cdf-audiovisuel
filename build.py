@@ -15,7 +15,7 @@ YouTube mélangées, triées par date décroissante, badge de provenance sur
 chaque carte.
 """
 import xml.etree.ElementTree as ET
-import re, html, base64, os, sys, datetime
+import re, html, base64, os, sys, time, datetime
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -56,8 +56,16 @@ YT_CHANNELS = [
 YT_PER_CHANNEL = 6
 
 
-def get(url, timeout=25):
-    return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout).read()
+def get(url, timeout=25, tries=3):
+    for i in range(tries):
+        try:
+            return urllib.request.urlopen(
+                urllib.request.Request(url, headers=UA), timeout=timeout).read()
+        except Exception:
+            if i == tries - 1:
+                raise
+            time.sleep(3 * (i + 1))
+    raise RuntimeError('unreachable')
 
 
 def slugify(s):
@@ -247,6 +255,8 @@ def card(e):
 
 def build():
     items = parse_feed(get(FEED))
+    if not items:
+        sys.exit('flux du site vide : on ne remplace pas la page existante')
     fetch_thumbs(items)
 
     channels = []
@@ -255,6 +265,11 @@ def build():
             channels.append(parse_channel(cid))
         except Exception as e:
             print(f'chaîne YouTube KO ({e}): {cid}', file=sys.stderr)
+    # YouTube bloque les IP de datacenter (404 systématique depuis GitHub
+    # Actions) : un build sans aucune chaîne est dégradé, on abandonne plutôt
+    # que d'écraser une bonne version
+    if not channels:
+        sys.exit('aucune chaîne YouTube récupérée : build abandonné')
 
     order, groups = [], {}
     for o in items:
