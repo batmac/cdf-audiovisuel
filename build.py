@@ -576,8 +576,8 @@ footer.colophon a {{ color: var(--garnet-ink); }}
   </header>
   <nav class="themes" aria-label="Filtrer et trier">
     <span class="views" role="group" aria-label="Tri">
-      <button class="vbtn is-active" data-view="theme" aria-pressed="true">Par thème</button>
-      <button class="vbtn" data-view="date" aria-pressed="false">Par date</button>
+      <button class="vbtn is-active" data-view="date" aria-pressed="true">Par date</button>
+      <button class="vbtn" data-view="theme" aria-pressed="false">Par thème</button>
     </span>
     <span class="sep" aria-hidden="true"></span>
 {chr(10).join(chips)}
@@ -602,7 +602,7 @@ footer.colophon a {{ color: var(--garnet-ink); }}
   var home = cards.map(function (c) {{ return {{ card: c, grid: c.parentNode }}; }});
   var byDate = cards.slice().sort(function (a, b) {{ return (+b.dataset.k) - (+a.dataset.k); }});
   var calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  var view = 'theme', area = '*';
+  var view = 'date', area = '*';
 
   function apply() {{
     document.documentElement.classList.toggle('view-date', view === 'date');
@@ -641,6 +641,7 @@ footer.colophon a {{ color: var(--garnet-ink); }}
       apply();
     }});
   }});
+  apply();
 }})();
 </script>
 '''
