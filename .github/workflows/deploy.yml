@@ -1,14 +1,20 @@
 name: build-and-deploy
 
 # YouTube répond parfois 404 depuis certains runners (blocage intermittent des
-# IP de datacenter). build.py échoue alors volontairement : on ne déploie
-# jamais une page dégradée, la version précédente reste en ligne, et le cron
-# de midi offre une seconde chance.
+# IP de datacenter, surtout aux créneaux cron très fréquentés). build.py échoue
+# alors volontairement : on ne déploie jamais une page dégradée. Le premier
+# échec n'est pas bloquant : on retente une fois sur un runner neuf (autre IP),
+# et seule la double panne fait échouer le workflow.
 on:
   schedule:
-    - cron: '30 6 * * *'  # ~08h30 Paris l'été, 07h30 l'hiver
-    - cron: '30 12 * * *' # seconde chance si le build du matin a échoué
+    - cron: '23 6 * * *'  # ~08h23 Paris l'été — minutes décalées des créneaux surchargés
+    - cron: '41 12 * * *' # seconde passe de la journée
   workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: "Forcer l'échec du premier build (test du chemin de retry)"
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -24,9 +30,33 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.gen.outcome }}
     steps:
       - uses: actions/checkout@v4
       - name: Générer la page depuis les flux
+        id: gen
+        continue-on-error: true
+        env:
+          SIMULATE_FAILURE: ${{ inputs.simulate_failure }}
+        run: |
+          if [ "$SIMULATE_FAILURE" = "true" ]; then echo "échec simulé"; exit 1; fi
+          python3 build.py
+      - name: Préparer le site
+        if: steps.gen.outcome == 'success'
+        run: mkdir -p _site && cp index.html _site/
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.gen.outcome == 'success'
+        with:
+          path: _site
+
+  build-retry:
+    needs: build
+    if: needs.build.outputs.ok != 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Générer la page (seconde tentative, runner neuf)
         run: python3 build.py
       - name: Préparer le site
         run: mkdir -p _site && cp index.html _site/
@@ -35,7 +65,8 @@ jobs:
           path: _site
 
   deploy:
-    needs: build
+    needs: [build, build-retry]
+    if: always() && (needs.build.outputs.ok == 'success' || needs.build-retry.result == 'success')
     runs-on: ubuntu-latest
     environment:
       name: github-pages
