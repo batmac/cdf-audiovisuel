@@ -19,10 +19,15 @@ la taxonomie des chaires du site et écrit :
 - `cdf.html` — le même contenu en fragment, pour l'artifact claude.ai.
 
 Le workflow [`deploy.yml`](.github/workflows/deploy.yml) reconstruit et déploie
-le site chaque matin (cron 06:30 UTC, seconde chance à 12:30), à chaque push, ou
-à la demande. YouTube répondant parfois 404 depuis les runners, `build.py`
-échoue volontairement dès qu'une source manque : on ne déploie jamais une page
-dégradée, la version précédente reste en ligne.
+le site trois fois par jour (cron 06:23, 12:41 et 18:07 UTC), à chaque push, ou
+à la demande. Les sources tombent régulièrement (site du Collège en
+maintenance ou en 502/504, YouTube en 404 depuis certains runners) :
+`build.py` abandonne alors sans rien écrire, avec le code de sortie 75
+(`EX_TEMPFAIL`). On ne déploie jamais une page dégradée, la version précédente
+reste en ligne, et le workflow compte ce cas comme réussi (avec un
+avertissement, pas d'alerte). Il n'échoue que sur un vrai bug de build, ou si
+la page en ligne date de plus de `MAX_STALE_DAYS` jours (3) sans qu'aucune
+reconstruction n'ait abouti.
 
 ```bash
 python3 build.py
