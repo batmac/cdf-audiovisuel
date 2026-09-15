@@ -26,8 +26,9 @@ maintenance ou en 502/504, YouTube en 404 depuis certains runners) :
 (`EX_TEMPFAIL`). On ne déploie jamais une page dégradée, la version précédente
 reste en ligne, et le workflow compte ce cas comme réussi (avec un
 avertissement, pas d'alerte). Il n'échoue que sur un vrai bug de build, ou si
-la page en ligne date de plus de `MAX_STALE_DAYS` jours (3) sans qu'aucune
-reconstruction n'ait abouti.
+la page en ligne date de plus de `MAX_STALE_DAYS` jours (7) sans qu'aucune
+reconstruction n'ait abouti ; ce second contrôle n'est bloquant qu'au créneau
+du matin, pour ne pas recevoir plus d'un mail par jour pendant une panne longue.
 
 ```bash
 python3 build.py

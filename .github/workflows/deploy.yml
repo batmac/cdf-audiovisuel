@@ -7,7 +7,9 @@ name: build-and-deploy
 # réussi avec un avertissement, rien n'est déployé et la page en ligne reste.
 # Le workflow n'échoue (donc n'alerte) que dans deux cas : un vrai bug de build
 # (autre code de sortie) ou une page en ligne plus vieille que MAX_STALE_DAYS,
-# signe que les sources sont en panne depuis trop longtemps.
+# signe que les sources sont en panne depuis trop longtemps. Ce second contrôle
+# n'échoue qu'au créneau planifié du matin (ou sur push / lancement manuel) :
+# une panne longue vaut un mail par jour, pas un par exécution.
 on:
   schedule:
     - cron: '23 6 * * *'   # ~08h23 Paris l'été — minutes décalées des créneaux surchargés
@@ -33,7 +35,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  MAX_STALE_DAYS: 3
+  MAX_STALE_DAYS: 7
 
 jobs:
   build:
@@ -60,7 +62,9 @@ jobs:
             *)  echo "::error::build.py a échoué (code $rc)"; exit "$rc" ;;
           esac
       - name: Vérifier l'âge de la page en ligne
-        if: steps.gen.outputs.built == 'false'
+        if: >-
+          steps.gen.outputs.built == 'false'
+          && (github.event_name != 'schedule' || github.event.schedule == '23 6 * * *')
         run: |
           url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
           lm=$(curl -sSIL --max-time 30 "$url" | tr -d '\r' \
