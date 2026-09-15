@@ -1,20 +1,25 @@
 name: build-and-deploy
 
-# YouTube répond parfois 404 depuis certains runners (blocage intermittent des
-# IP de datacenter, surtout aux créneaux cron très fréquentés). build.py échoue
-# alors volontairement : on ne déploie jamais une page dégradée. Le premier
-# échec n'est pas bloquant : on retente une fois sur un runner neuf (autre IP),
-# et seule la double panne fait échouer le workflow.
+# Les sources tombent régulièrement : le site du Collège passe en maintenance
+# (redirection vers /maintenance.html), répond 502/504, et YouTube renvoie des
+# 404 intermittents depuis les IP de datacenter. build.py sort alors avec le
+# code 75 (EX_TEMPFAIL) : ce n'est pas une erreur du projet, le run est marqué
+# réussi avec un avertissement, rien n'est déployé et la page en ligne reste.
+# Le workflow n'échoue (donc n'alerte) que dans deux cas : un vrai bug de build
+# (autre code de sortie) ou une page en ligne plus vieille que MAX_STALE_DAYS,
+# signe que les sources sont en panne depuis trop longtemps.
 on:
   schedule:
-    - cron: '23 6 * * *'  # ~08h23 Paris l'été — minutes décalées des créneaux surchargés
-    - cron: '41 12 * * *' # seconde passe de la journée
+    - cron: '23 6 * * *'   # ~08h23 Paris l'été — minutes décalées des créneaux surchargés
+    - cron: '41 12 * * *'  # ~14h41
+    - cron: '7 18 * * *'   # ~20h07 — les maintenances du matin durent parfois la journée
   workflow_dispatch:
     inputs:
-      simulate_failure:
-        description: "Forcer l'échec du premier build (test du chemin de retry)"
-        type: boolean
-        default: false
+      simulate:
+        description: "Simuler un résultat de build.py (test des chemins du workflow)"
+        type: choice
+        options: [aucun, sources-indisponibles, bug]
+        default: aucun
   push:
     branches: [main]
 
@@ -27,46 +32,60 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  MAX_STALE_DAYS: 3
+
 jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      ok: ${{ steps.gen.outcome }}
+      built: ${{ steps.gen.outputs.built }}
     steps:
       - uses: actions/checkout@v4
       - name: Générer la page depuis les flux
         id: gen
-        continue-on-error: true
         env:
-          SIMULATE_FAILURE: ${{ inputs.simulate_failure }}
+          SIMULATE: ${{ inputs.simulate }}
         run: |
-          if [ "$SIMULATE_FAILURE" = "true" ]; then echo "échec simulé"; exit 1; fi
-          python3 build.py
+          rc=0
+          case "$SIMULATE" in
+            sources-indisponibles) echo "simulation : sources indisponibles"; rc=75 ;;
+            bug) echo "simulation : bug"; rc=1 ;;
+            *) python3 build.py || rc=$? ;;
+          esac
+          case $rc in
+            0)  echo "built=true" >> "$GITHUB_OUTPUT" ;;
+            75) echo "built=false" >> "$GITHUB_OUTPUT"
+                echo "::warning::Sources indisponibles : build abandonné, la page en ligne est conservée." ;;
+            *)  echo "::error::build.py a échoué (code $rc)"; exit "$rc" ;;
+          esac
+      - name: Vérifier l'âge de la page en ligne
+        if: steps.gen.outputs.built == 'false'
+        run: |
+          url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
+          lm=$(curl -sSIL --max-time 30 "$url" | tr -d '\r' \
+               | awk -F': ' 'tolower($1) == "last-modified" { v = $2 } END { print v }')
+          if [ -z "$lm" ]; then
+            echo "::warning::Impossible de dater la page en ligne ($url)"
+            exit 0
+          fi
+          age=$(( ( $(date -u +%s) - $(date -u -d "$lm" +%s) ) / 86400 ))
+          echo "page en ligne datée du $lm, soit $age jour(s)"
+          if [ "$age" -ge "$MAX_STALE_DAYS" ]; then
+            echo "::error::Sources indisponibles et page en ligne vieille de $age jours (seuil : $MAX_STALE_DAYS)"
+            exit 1
+          fi
       - name: Préparer le site
-        if: steps.gen.outcome == 'success'
+        if: steps.gen.outputs.built == 'true'
         run: mkdir -p _site && cp index.html _site/
       - uses: actions/upload-pages-artifact@v3
-        if: steps.gen.outcome == 'success'
-        with:
-          path: _site
-
-  build-retry:
-    needs: build
-    if: needs.build.outputs.ok != 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Générer la page (seconde tentative, runner neuf)
-        run: python3 build.py
-      - name: Préparer le site
-        run: mkdir -p _site && cp index.html _site/
-      - uses: actions/upload-pages-artifact@v3
+        if: steps.gen.outputs.built == 'true'
         with:
           path: _site
 
   deploy:
-    needs: [build, build-retry]
-    if: always() && (needs.build.outputs.ok == 'success' || needs.build-retry.result == 'success')
+    needs: build
+    if: needs.build.outputs.built == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

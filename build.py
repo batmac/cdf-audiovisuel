@@ -13,9 +13,14 @@ côté de ce script :
 La page est un fil unique de cartes par thème : séances du site et vidéos
 YouTube mélangées, triées par date décroissante, badge de provenance sur
 chaque carte.
+
+Codes de sortie : 0 page générée ; 75 (EX_TEMPFAIL) une source est hors
+service, rien n'est écrit et il faut retenter plus tard ; 1 vrai bug.
 """
 import xml.etree.ElementTree as ET
 import re, html, base64, os, sys, time, datetime
+import http.client
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -55,17 +60,43 @@ YT_CHANNELS = [
 ]
 YT_PER_CHANNEL = 6
 
+EX_TEMPFAIL = 75  # sysexits.h : échec temporaire, à retenter plus tard
 
-def get(url, timeout=25, tries=3):
+
+class SourceUnavailable(Exception):
+    """Une source est hors service (maintenance, 5xx, panne réseau, YouTube 404).
+
+    Rien à corriger dans le code : le build est abandonné sans rien écrire, la
+    page en ligne reste, et la prochaine exécution planifiée retentera.
+    """
+
+
+def get(url, timeout=25, tries=4):
+    """GET avec retries (5 s, 10 s puis 20 s d'attente entre les essais).
+
+    Toute erreur est retentée. Une fois les essais épuisés, les pannes de la
+    source (erreur réseau, timeout, 5xx/429, redirection du site du Collège
+    vers sa page de maintenance) remontent en SourceUnavailable ; les autres
+    erreurs HTTP (404…) remontent telles quelles, à l'appelant de juger.
+    """
+    err = None
     for i in range(tries):
+        if i:
+            time.sleep(5 * 2 ** (i - 1))
         try:
-            return urllib.request.urlopen(
-                urllib.request.Request(url, headers=UA), timeout=timeout).read()
-        except Exception:
-            if i == tries - 1:
-                raise
-            time.sleep(3 * (i + 1))
-    raise RuntimeError('unreachable')
+            with urllib.request.urlopen(
+                    urllib.request.Request(url, headers=UA), timeout=timeout) as r:
+                if r.geturl().endswith('/maintenance.html'):
+                    raise SourceUnavailable(f'site en maintenance : {url}')
+                return r.read()
+        except SourceUnavailable as e:
+            err = e
+        except urllib.error.HTTPError as e:
+            err = (SourceUnavailable(f'HTTP {e.code} : {url}')
+                   if e.code >= 500 or e.code == 429 else e)
+        except (OSError, http.client.HTTPException) as e:
+            err = SourceUnavailable(f'{type(e).__name__} ({e}) : {url}')
+    raise err
 
 
 def slugify(s):
@@ -109,6 +140,8 @@ def fetch_thumbs(items):
         if u and u not in cache:
             try:
                 cache[u] = 'data:image/jpeg;base64,' + base64.b64encode(get(u)).decode()
+            except SourceUnavailable:
+                raise
             except Exception as e:
                 print(f'vignette KO ({e}): {u}', file=sys.stderr)
                 cache[u] = None
@@ -192,6 +225,8 @@ def chaire_area(path):
             if m:
                 c = re.search(r'area-label__color"\s+style="--color:\s*(#[0-9a-fA-F]{3,8})', h)
                 area = (html.unescape(m.group(1)).strip(), c.group(1) if c else None)
+        except SourceUnavailable:
+            raise
         except Exception as e:
             print(f'chaire KO ({e}): {path}', file=sys.stderr)
         _chaire_cache[path] = area
@@ -256,9 +291,13 @@ def card(e, slug, color):
 
 
 def build():
-    items = parse_feed(get(FEED))
+    try:
+        items = parse_feed(get(FEED))
+    except ET.ParseError as e:
+        # page d'erreur HTML servie en 200 à la place du XML
+        raise SourceUnavailable(f'flux du site illisible ({e}) : {FEED}') from e
     if not items:
-        sys.exit('flux du site vide : on ne remplace pas la page existante')
+        raise SourceUnavailable('flux du site vide')
     fetch_thumbs(items)
 
     # YouTube répond parfois 404 depuis les IP de datacenter : plutôt que de
@@ -268,7 +307,7 @@ def build():
         try:
             channels.append(parse_channel(cid))
         except Exception as e:
-            sys.exit(f'chaîne YouTube irrécupérable ({e}): {cid} — build abandonné')
+            raise SourceUnavailable(f'chaîne YouTube {cid} : {e}') from e
 
     order, groups = [], {}
     for o in items:
@@ -659,4 +698,9 @@ footer.colophon a {{ color: var(--garnet-ink); }}
 
 
 if __name__ == '__main__':
-    build()
+    try:
+        build()
+    except SourceUnavailable as e:
+        print(f'source indisponible, build abandonné (la page en ligne reste) : {e}',
+              file=sys.stderr)
+        sys.exit(EX_TEMPFAIL)
